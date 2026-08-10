@@ -1,0 +1,304 @@
+name: Release Go project
+
+on:
+  workflow_call:
+    inputs:
+      commit-sha:
+        description: Successful CI commit to release
+        required: true
+        type: string
+      project-name:
+        description: Stable project name used in source artifact names
+        required: true
+        type: string
+      distribution:
+        description: Release artifact strategy (source or goreleaser)
+        required: true
+        type: string
+      go-version:
+        description: Exact Go toolchain version
+        required: true
+        type: string
+      default-branch:
+        description: Branch whose current tip may be released
+        default: main
+        type: string
+      coverage-floor:
+        description: Minimum source-module statement coverage percentage
+        default: 0
+        type: number
+      publish-coverage:
+        description: Attach coverage.out to the public GitHub release
+        default: false
+        type: boolean
+      release-title-with-date:
+        description: Append the UTC release date to the release title
+        default: false
+        type: boolean
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Validate inputs
+        env:
+          DISTRIBUTION: ${{ inputs.distribution }}
+        run: |
+          case "$DISTRIBUTION" in
+            source|goreleaser) ;;
+            *) echo "distribution must be source or goreleaser" >&2; exit 1 ;;
+          esac
+
+      - name: Checkout successful CI commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.commit-sha }}
+
+      - name: Select release version
+        id: version
+        env:
+          DEFAULT_BRANCH: ${{ inputs.default-branch }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "$DEFAULT_BRANCH" --tags
+
+          # A retry after tag creation but before release publication must
+          # finish that release instead of consuming another patch number.
+          EXISTING_TAG=$(git tag --points-at HEAD --list 'v*.*.*' --sort=-version:refname | head -n 1)
+          if [ -n "$EXISTING_TAG" ]; then
+            if gh release view "$EXISTING_TAG" >/dev/null 2>&1; then
+              echo "HEAD is already released as $EXISTING_TAG; nothing to release."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$(git cat-file -t "refs/tags/$EXISTING_TAG")" != "tag" ]; then
+              echo "Existing release tag $EXISTING_TAG is not annotated." >&2
+              exit 1
+            fi
+            echo "Resuming unpublished release $EXISTING_TAG."
+            echo "tag=$EXISTING_TAG" >> "$GITHUB_OUTPUT"
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A newer main build owns the next release.
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$DEFAULT_BRANCH")" ]; then
+            echo "A newer $DEFAULT_BRANCH commit superseded this CI run; nothing to release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BASE_VERSION=$(tr -d '[:space:]' < VERSION)
+          if ! [[ "$BASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must contain a semantic version without a leading v." >&2
+            exit 1
+          fi
+
+          BASE_TAG="v$BASE_VERSION"
+          LATEST=$(git tag --list 'v*.*.*' --sort=-version:refname | head -n 1)
+          if [ -z "$LATEST" ]; then
+            TAG="$BASE_TAG"
+          elif [ "$LATEST" != "$BASE_TAG" ] && [ "$(printf '%s\n%s\n' "$LATEST" "$BASE_TAG" | sort -V | tail -n 1)" = "$BASE_TAG" ]; then
+            TAG="$BASE_TAG"
+          else
+            TAG=$(awk -F '[v.]' '{printf "v%d.%d.%d", $2, $3, $4 + 1}' <<< "$LATEST")
+          fi
+
+          echo "Selected $TAG."
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+
+      - name: Set up exact Go toolchain
+        if: ${{ steps.version.outputs.skip != 'true' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ inputs.go-version }}
+
+      - name: Create local annotated tag
+        if: ${{ steps.version.outputs.skip != 'true' && steps.version.outputs.tag_exists != 'true' }}
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$TAG" --message "Release $TAG"
+
+      - name: Verify source module
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'source' }}
+        env:
+          COVERAGE_FLOOR: ${{ inputs.coverage-floor }}
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test -race -coverprofile=coverage.out ./...
+          COVERAGE=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          awk -v coverage="$COVERAGE" -v floor="$COVERAGE_FLOOR" 'BEGIN { if (coverage < floor) exit 1 }'
+          test -z "$(gofmt -l .)"
+
+      - name: Retain coverage evidence
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'source' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-coverage-${{ inputs.commit-sha }}
+          path: coverage.out
+          retention-days: 90
+
+      - name: Build source artifact
+        id: source
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'source' }}
+        env:
+          PROJECT_NAME: ${{ inputs.project-name }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          ARCHIVE="$PROJECT_NAME-$TAG.tar.gz"
+          git archive --format=tar.gz --prefix="$PROJECT_NAME-$TAG/" --output="$ARCHIVE" HEAD
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Build GoReleaser artifacts
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'goreleaser' }}
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: v2.14.3
+          args: release --clean --skip=publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GORELEASER_CURRENT_TAG: ${{ steps.version.outputs.tag }}
+
+      - name: Record source release toolchain
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'source' }}
+        run: |
+          go version > toolchain.txt
+          go env GOOS GOARCH GOVERSION GOTOOLCHAIN >> toolchain.txt
+          git rev-parse HEAD >> toolchain.txt
+
+      - name: Record GoReleaser toolchain
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'goreleaser' }}
+        run: |
+          go version > dist/toolchain.txt
+          go env GOOS GOARCH GOVERSION GOTOOLCHAIN >> dist/toolchain.txt
+          echo "goreleaser v2.14.3" >> dist/toolchain.txt
+          git rev-parse HEAD >> dist/toolchain.txt
+
+      - name: Generate source module SBOM
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'source' }}
+        run: go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0 mod -json -output sbom.cdx.json
+
+      - name: Generate GoReleaser module SBOM
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'goreleaser' }}
+        run: go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0 mod -json -output dist/sbom.cdx.json
+
+      - name: Checksum source release assets
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'source' }}
+        env:
+          ARCHIVE: ${{ steps.source.outputs.archive }}
+          PUBLISH_COVERAGE: ${{ inputs.publish-coverage }}
+        run: |
+          ASSETS=("$ARCHIVE" sbom.cdx.json toolchain.txt)
+          if [ "$PUBLISH_COVERAGE" = true ]; then
+            ASSETS+=(coverage.out)
+          fi
+          sha256sum "${ASSETS[@]}" > SHA256SUMS
+
+      - name: Checksum GoReleaser release assets
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'goreleaser' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ASSETS=(dist/*.tar.gz dist/*.zip dist/checksums.txt dist/sbom.cdx.json dist/toolchain.txt dist/homebrew/Casks/*.rb)
+          if [ "${#ASSETS[@]}" -lt 5 ]; then
+            echo "GoReleaser did not produce the expected release assets." >&2
+            exit 1
+          fi
+          (
+            cd dist
+            for asset in "${ASSETS[@]}"; do
+              sha256sum "${asset#dist/}"
+            done
+          ) > dist/SHA256SUMS
+
+      - name: Attest source build provenance
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'source' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.source.outputs.archive }}
+
+      - name: Attest source SBOM
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'source' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.source.outputs.archive }}
+          sbom-path: sbom.cdx.json
+
+      - name: Attest GoReleaser build provenance
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'goreleaser' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+      - name: Attest GoReleaser SBOM
+        if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'goreleaser' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+          sbom-path: dist/sbom.cdx.json
+
+      - name: Push annotated tag
+        id: push_tag
+        if: ${{ steps.version.outputs.skip != 'true' && steps.version.outputs.tag_exists != 'true' }}
+        env:
+          DEFAULT_BRANCH: ${{ inputs.default-branch }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git fetch origin "$DEFAULT_BRANCH" --tags
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$DEFAULT_BRANCH")" ]; then
+            echo "A newer $DEFAULT_BRANCH commit superseded this release during artifact generation."
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git push origin "refs/tags/$TAG"
+
+      - name: Publish source release
+        if: ${{ steps.version.outputs.skip != 'true' && steps.push_tag.outputs.superseded != 'true' && inputs.distribution == 'source' }}
+        env:
+          ARCHIVE: ${{ steps.source.outputs.archive }}
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH_COVERAGE: ${{ inputs.publish-coverage }}
+          RELEASE_TITLE_WITH_DATE: ${{ inputs.release-title-with-date }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          ASSETS=("$ARCHIVE" sbom.cdx.json toolchain.txt SHA256SUMS)
+          if [ "$PUBLISH_COVERAGE" = true ]; then
+            ASSETS+=(coverage.out)
+          fi
+          TITLE="$TAG"
+          if [ "$RELEASE_TITLE_WITH_DATE" = true ]; then
+            TITLE="$TAG ($(date -u +%Y.%m.%d))"
+          fi
+          gh release create "$TAG" "${ASSETS[@]}" --generate-notes --title "$TITLE" --verify-tag
+
+      - name: Publish GoReleaser release
+        if: ${{ steps.version.outputs.skip != 'true' && steps.push_tag.outputs.superseded != 'true' && inputs.distribution == 'goreleaser' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TITLE_WITH_DATE: ${{ inputs.release-title-with-date }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ASSETS=(dist/*.tar.gz dist/*.zip dist/checksums.txt dist/SHA256SUMS dist/sbom.cdx.json dist/toolchain.txt dist/homebrew/Casks/*.rb)
+          TITLE="$TAG"
+          if [ "$RELEASE_TITLE_WITH_DATE" = true ]; then
+            TITLE="$TAG ($(date -u +%Y.%m.%d))"
+          fi
+          gh release create "$TAG" "${ASSETS[@]}" --notes-file dist/CHANGELOG.md --title "$TITLE" --verify-tag
