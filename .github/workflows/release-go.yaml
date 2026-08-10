@@ -172,17 +172,21 @@ jobs:
       - name: Record source release toolchain
         if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'source' }}
         run: |
-          go version > toolchain.txt
-          go env GOOS GOARCH GOVERSION GOTOOLCHAIN >> toolchain.txt
-          git rev-parse HEAD >> toolchain.txt
+          {
+            go version
+            go env GOOS GOARCH GOVERSION GOTOOLCHAIN
+            git rev-parse HEAD
+          } > toolchain.txt
 
       - name: Record GoReleaser toolchain
         if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'goreleaser' }}
         run: |
-          go version > dist/toolchain.txt
-          go env GOOS GOARCH GOVERSION GOTOOLCHAIN >> dist/toolchain.txt
-          echo "goreleaser v2.14.3" >> dist/toolchain.txt
-          git rev-parse HEAD >> dist/toolchain.txt
+          {
+            go version
+            go env GOOS GOARCH GOVERSION GOTOOLCHAIN
+            echo "goreleaser v2.14.3"
+            git rev-parse HEAD
+          } > dist/toolchain.txt
 
       - name: Generate source module SBOM
         if: ${{ steps.version.outputs.skip != 'true' && inputs.distribution == 'source' }}
