@@ -17,6 +17,11 @@ selects one of two distribution strategies:
 - `goreleaser` builds the repository's `.goreleaser.yaml` configuration without
   publishing, then publishes the resulting archives through the shared policy.
 
+Callers may also set `container-image` to publish a multi-architecture image
+tagged with the release version and `latest`. Container publication includes
+BuildKit provenance and SBOM attestations plus a GitHub build-provenance
+attestation, and must succeed before the GitHub release is published.
+
 Both strategies:
 
 - serialize version selection and ignore superseded untagged commits;
