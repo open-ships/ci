@@ -2,9 +2,9 @@
 
 Shared, versioned GitHub Actions policy for Open Ships repositories.
 
-Changes to reusable workflows are linted in this repository before callers pin
-a new commit SHA. A caller remains on its reviewed policy version until its pin
-is deliberately updated.
+Changes to reusable workflows are linted in this repository before a new
+semantic-version tag is published. A caller remains on its reviewed policy
+version until its exact tag reference is deliberately updated.
 
 ## Go releases
 
@@ -29,5 +29,6 @@ Both strategies:
 
 Callers must grant `contents: write`, `id-token: write`, `attestations: write`,
 and `artifact-metadata: write`. They must guard the privileged reusable job so
-it accepts only a successful `push` CI run from the caller repository. Pin this
-workflow by its full commit SHA; do not reference `main`.
+it accepts only a successful `push` CI run from the caller repository. Reference
+an exact semantic-version tag such as `v1.0.1`; do not reference `main` or a
+moving major-version tag.
