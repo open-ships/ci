@@ -35,5 +35,6 @@ Both strategies:
 Callers must grant `contents: write`, `id-token: write`, `attestations: write`,
 and `artifact-metadata: write`. They must guard the privileged reusable job so
 it accepts only a successful `push` CI run from the caller repository. Reference
-an exact semantic-version tag such as `v1.0.1`; do not reference `main` or a
-moving major-version tag.
+an exact semantic-version tag such as `v1.1.0`; do not reference `main` or a
+moving major-version tag. Callers that set `container-image` must additionally
+grant `packages: write`.
