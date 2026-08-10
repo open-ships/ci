@@ -2,6 +2,10 @@
 
 Shared, versioned GitHub Actions policy for Open Ships repositories.
 
+Changes to reusable workflows are linted in this repository before callers pin
+a new commit SHA. A caller remains on its reviewed policy version until its pin
+is deliberately updated.
+
 ## Go releases
 
 `.github/workflows/release-go.yaml` is a reusable release workflow for Go
