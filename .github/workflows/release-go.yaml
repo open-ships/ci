@@ -16,8 +16,8 @@ on:
         required: true
         type: string
       go-version:
-        description: Exact Go toolchain version
-        required: true
+        description: Shared Go toolchain version (override only for compatibility)
+        default: "1.26.8"
         type: string
       default-branch:
         description: Branch whose current tip may be released
