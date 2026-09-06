@@ -1,0 +1,22 @@
+name: Require checks
+
+on:
+  workflow_call:
+    inputs:
+      results:
+        description: JSON needs context from a caller job with if always()
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every check to succeed
+        env:
+          RESULTS: ${{ inputs.results }}
+        run: |
+          printf '%s\n' "$RESULTS" | jq -e 'length > 0 and all(.[]; .result == "success")'

@@ -1,0 +1,195 @@
+name: Check Go project
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner for this check (callers may supply a platform matrix)
+        default: ubuntu-24.04
+        type: string
+      go-version:
+        description: Override only for explicit toolchain compatibility checks
+        default: "1.26.8"
+        type: string
+      timeout-minutes:
+        default: 30
+        type: number
+      fetch-depth:
+        default: 1
+        type: number
+      cache:
+        default: true
+        type: boolean
+      cache-dependency-path:
+        default: |
+          **/go.mod
+          **/go.sum
+        type: string
+      setup-just:
+        default: false
+        type: boolean
+      browser:
+        description: Install Node, locked npm dependencies, and Playwright Chromium
+        default: false
+        type: boolean
+      lint:
+        description: Run the shared golangci-lint version with repository configuration
+        default: false
+        type: boolean
+      security:
+        description: Run govulncheck and gosec
+        default: false
+        type: boolean
+      gosec-excludes:
+        description: Repository-specific rule exclusions, separated by commas
+        default: ""
+        type: string
+      gosec-exclude-generated:
+        default: true
+        type: boolean
+      static-analysis:
+        description: Supply errcheck, staticcheck, actionlint, and govulncheck to repository scripts
+        default: false
+        type: boolean
+      command:
+        description: Reviewed repository checks, run with Bash fail-fast and pipefail
+        default: ""
+        type: string
+      environment:
+        description: JSON object of environment variables for repository checks
+        default: '{}'
+        type: string
+      artifact-name:
+        default: ""
+        type: string
+      artifact-enabled:
+        description: Allow a platform matrix to retain evidence on selected runners
+        default: true
+        type: boolean
+      artifact-path:
+        description: Evidence to retain even when repository checks fail
+        default: ""
+        type: string
+      failure-artifact-name:
+        default: ""
+        type: string
+      failure-artifact-path:
+        description: Additional evidence to retain only on failure, such as fuzz seeds
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      GOTOOLCHAIN: local
+      OPEN_SHIPS_CI: "true"
+
+    steps:
+      - name: Require an executable check
+        if: inputs.command == '' && !inputs.lint && !inputs.security
+        run: |
+          echo 'Set command, lint, or security; installing tools alone is not a check.' >&2
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: ${{ inputs.cache }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: Set up just
+        if: inputs.setup-just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          just-version: "1.58.0"
+
+      - name: Set up Node
+        if: inputs.browser
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+          cache: npm
+
+      - name: Install browser dependencies
+        if: inputs.browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Lint
+        if: inputs.lint
+        uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
+        with:
+          version: v2.12.0
+
+      - name: Install vulnerability scanner
+        if: inputs.security || inputs.static-analysis
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Install static analysis tools
+        if: inputs.static-analysis
+        run: |
+          go install github.com/kisielk/errcheck@v1.20.0
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Check vulnerabilities
+        if: inputs.security
+        run: govulncheck ./...
+
+      - name: Check security
+        if: inputs.security
+        env:
+          GOSEC_EXCLUDES: ${{ inputs.gosec-excludes }}
+          GOSEC_EXCLUDE_GENERATED: ${{ inputs.gosec-exclude-generated }}
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+          args=(-exclude-dir=.claude)
+          if [ "$GOSEC_EXCLUDE_GENERATED" = true ]; then
+            args+=(-exclude-generated)
+          fi
+          if [ -n "$GOSEC_EXCLUDES" ]; then
+            args+=("-exclude=$GOSEC_EXCLUDES")
+          fi
+          gosec "${args[@]}" ./...
+
+      - name: Prepare repository checks
+        if: inputs.command != ''
+        env:
+          CHECK_COMMAND: ${{ inputs.command }}
+        run: printf '%s\n' "$CHECK_COMMAND" > "$RUNNER_TEMP/open-ships-checks.sh"
+
+      - name: Run repository checks
+        if: inputs.command != ''
+        env: ${{ fromJSON(inputs.environment) }}
+        run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/open-ships-checks.sh"
+
+      - name: Retain check evidence
+        if: always() && inputs.artifact-enabled && inputs.artifact-path != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: warn
+
+      - name: Retain failure evidence
+        if: failure() && inputs.failure-artifact-path != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.failure-artifact-name }}
+          path: ${{ inputs.failure-artifact-path }}
+          if-no-files-found: ignore
